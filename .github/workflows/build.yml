@@ -1,0 +1,182 @@
+name: Build Extensions
+
+on:
+  push:
+    branches:
+      - master
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # ── 1. Checkout master ──────────────────────────────────────────────────
+      - name: Checkout master
+        uses: actions/checkout@v4
+        with:
+          path: master
+
+      # ── 2. Checkout (or create) builds branch ───────────────────────────────
+      - name: Checkout builds branch
+        uses: actions/checkout@v4
+        with:
+          ref: builds
+          path: builds
+        continue-on-error: true   # branch may not exist yet on first run
+
+      - name: Init builds branch if missing
+        run: |
+          if [ ! -d builds/.git ]; then
+            mkdir -p builds
+            cd builds
+            git init
+            git remote add origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+            git checkout --orphan builds
+            git config user.name  "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            echo "# CNCVerse Builds" > README.md
+            git add README.md
+            git commit -m "init builds branch"
+            git push origin builds
+          fi
+
+      # ── 3. Java 17 ──────────────────────────────────────────────────────────
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: temurin
+          cache: gradle
+
+      # ── 4. Android SDK ──────────────────────────────────────────────────────
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      # ── 5. Gradle cache ─────────────────────────────────────────────────────
+      - name: Cache Gradle dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('master/**/*.gradle.kts', 'master/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: gradle-
+
+      # ── 6. Build ────────────────────────────────────────────────────────────
+      - name: Build all extensions
+        working-directory: master
+        env:
+          MOVIEBOX_SECRET_KEY_DEFAULT:        ${{ secrets.MOVIEBOX_SECRET_KEY_DEFAULT }}
+          MOVIEBOX_SECRET_KEY_ALT:            ${{ secrets.MOVIEBOX_SECRET_KEY_ALT }}
+          CASTLE_SUFFIX:                      ${{ secrets.CASTLE_SUFFIX }}
+          SIMKL_API:                          ${{ secrets.SIMKL_API }}
+          MAL_API:                            ${{ secrets.MAL_API }}
+          CRICIFY_PROVIDER_SECRET1:           ${{ secrets.CRICIFY_PROVIDER_SECRET1 }}
+          CRICIFY_PROVIDER_SECRET2:           ${{ secrets.CRICIFY_PROVIDER_SECRET2 }}
+          PIKASHOW_API_KEY:                   ${{ secrets.PIKASHOW_API_KEY }}
+          PIKASHOW_HMAC_SECRET:               ${{ secrets.PIKASHOW_HMAC_SECRET }}
+          CRICFY_FIREBASE_API_KEY:            ${{ secrets.CRICFY_FIREBASE_API_KEY }}
+          CRICFY_FIREBASE_APP_ID:             ${{ secrets.CRICFY_FIREBASE_APP_ID }}
+          CRICFY_FIREBASE_PROJECT_NUMBER:     ${{ secrets.CRICFY_FIREBASE_PROJECT_NUMBER }}
+          SKLIVE_KEY:                         ${{ secrets.SKLIVE_KEY }}
+          SKLIVE_IV:                          ${{ secrets.SKLIVE_IV }}
+          SKLIVE_V23_KEY:                     ${{ secrets.SKLIVE_V23_KEY }}
+          SKLIVE_V23_IV:                      ${{ secrets.SKLIVE_V23_IV }}
+          SKTECH_FIREBASE_API_KEY:            ${{ secrets.SKTECH_FIREBASE_API_KEY }}
+          SKTECH_FIREBASE_APP_ID:             ${{ secrets.SKTECH_FIREBASE_APP_ID }}
+          SKTECH_FIREBASE_PROJECT_NUMBER:     ${{ secrets.SKTECH_FIREBASE_PROJECT_NUMBER }}
+          XON_FIREBASE_API_KEY:               ${{ secrets.XON_FIREBASE_API_KEY }}
+          XON_FIREBASE_APP_ID:                ${{ secrets.XON_FIREBASE_APP_ID }}
+          XON_FIREBASE_PROJECT_NUMBER:        ${{ secrets.XON_FIREBASE_PROJECT_NUMBER }}
+          CINETV_SECRET_KEY_ENCRYPTED:        ${{ secrets.CINETV_SECRET_KEY_ENCRYPTED }}
+          CINETV_DES_KEY:                     ${{ secrets.CINETV_DES_KEY }}
+          CINETV_DES_IV:                      ${{ secrets.CINETV_DES_IV }}
+          CINETV_AES_KEY:                     ${{ secrets.CINETV_AES_KEY }}
+          CINETV_AES_IV:                      ${{ secrets.CINETV_AES_IV }}
+          CINETV_WS_SECRET:                   ${{ secrets.CINETV_WS_SECRET }}
+          SMARTLINK_URL:                      ${{ secrets.SMARTLINK_URL }}
+          SPEEDLINK_URL:                      ${{ secrets.SPEEDLINK_URL }}
+        run: |
+          chmod +x gradlew
+          ./gradlew make createRepo --no-daemon --stacktrace 2>&1
+
+      # ── 7. Collect .cs3 files ───────────────────────────────────────────────
+      - name: Collect built .cs3 files
+        run: |
+          mkdir -p /tmp/cs3_out
+          find master -name "*.cs3" | while read f; do
+            cp "$f" /tmp/cs3_out/
+          done
+          echo "Built plugins:"
+          ls -lh /tmp/cs3_out/
+
+      # ── 8. Generate repo JSON ───────────────────────────────────────────────
+      - name: Generate CNC.json repo manifest
+        run: |
+          python3 master/.github/scripts/generate_repo.py \
+            --cs3_dir /tmp/cs3_out \
+            --repo_url "https://raw.githubusercontent.com/${{ github.repository }}/builds" \
+            --out /tmp/cs3_out/CNC.json
+          echo "=== CNC.json preview ==="
+          python3 -c "import json; d=json.load(open('/tmp/cs3_out/CNC.json')); print(f'Plugins: {len(d[\"plugins\"])}')"
+
+      # ── 9. Push to builds branch ────────────────────────────────────────────
+      - name: Push artifacts to builds branch
+        run: |
+          cd builds
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Copy everything from cs3_out
+          cp /tmp/cs3_out/*.cs3  . 2>/dev/null || true
+          cp /tmp/cs3_out/CNC.json . 2>/dev/null || true
+
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Nothing changed — skipping commit"
+          else
+            git commit -m "Build $(date -u '+%Y-%m-%d %H:%M UTC') from ${{ github.sha }}"
+            git push origin builds
+          fi
+
+      # ── 10. Upload to GitHub Actions artifacts ───────────────────────────────
+      - name: Upload .cs3 files as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CNCVerse-Extensions
+          path: /tmp/cs3_out/*.cs3
+          if-no-files-found: warn
+
+      - name: Upload CNC.json as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CNCVerse-repo-json
+          path: /tmp/cs3_out/CNC.json
+          if-no-files-found: warn
+
+      # ── 11. Create/update GitHub Release ────────────────────────────────────
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "Latest Build"
+          body: |
+            Automatically built from commit ${{ github.sha }}
+
+            **Install in CloudStream:**
+            Add this repository URL in CloudStream → Extensions → Add Repository:
+            ```
+            https://raw.githubusercontent.com/${{ github.repository }}/builds/CNC.json
+            ```
+          files: |
+            /tmp/cs3_out/*.cs3
+            /tmp/cs3_out/CNC.json
+          prerelease: false
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
